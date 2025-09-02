@@ -4,7 +4,7 @@ services:
   gitphish:
     build: .
     ports:
-      - "8080:8080"
+      - "0.0.0.0:8080:8080"
     volumes:
       # Mount data directory for persistent SQLite database
       - ./data:/app/data
