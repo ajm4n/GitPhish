@@ -6,6 +6,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the entire project
@@ -40,4 +41,4 @@ RUN mkdir -p /app/data
 EXPOSE 8080
 
 # Start the server
-CMD ["python", "gitphish/core/gui/server.py"]
+CMD ["python", "-c", "from gitphish.core.gui.server import GitPhishGuiServer; server = GitPhishGuiServer(host='0.0.0.0', port=8080); print('Starting server on 0.0.0.0:8080'); server.run(debug=False)"]
