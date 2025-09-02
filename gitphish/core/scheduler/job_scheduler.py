@@ -186,8 +186,8 @@ class JobScheduler:
                 timeout=3600  # 1 hour timeout
             )
             
-            # Generate campaign ID
-            campaign_id = f"{job_type.value}_{job_id}_{int(time.time())}"
+            # Extract real campaign ID from GitPhish output
+            campaign_id = self._extract_campaign_id_from_output(process.stdout, job_type.value, job_id)
             
             result_data = {
                 'campaign_id': campaign_id,
@@ -252,8 +252,8 @@ class JobScheduler:
             raise ValueError(f"Unsupported SMS campaign: {provider}-{platform}")
         
         # Add required arguments
-        cmd.extend(['--email', job_data['targetEmail']])
-        cmd.extend(['--phone', job_data['targetPhone']])
+        cmd.extend(['-e', job_data['targetEmail']])
+        cmd.extend(['-p', job_data['targetPhone']])
         
         if provider == 'twilio':
             cmd.extend(['--sid', job_data['twilioSid']])
@@ -286,8 +286,8 @@ class JobScheduler:
             raise ValueError(f"Unsupported Azure campaign: {provider}-{platform}")
         
         # Add required arguments
-        cmd.extend(['--email', job_data['targetEmail']])
-        cmd.extend(['--phone', job_data['targetPhone']])
+        cmd.extend(['-e', job_data['targetEmail']])
+        cmd.extend(['-p', job_data['targetPhone']])
         
         if provider == 'twilio':
             cmd.extend(['--sid', job_data['twilioSid']])
@@ -312,13 +312,17 @@ class JobScheduler:
         while self.running:
             try:
                 # Get pending jobs that are due to run
-                now = datetime.now()
+                from datetime import timezone
+                now = datetime.now(timezone.utc).replace(tzinfo=None)  # Get UTC time as naive
                 pending_jobs = self.get_scheduled_jobs(JobStatus.PENDING)
                 
                 for job in pending_jobs:
                     scheduled_time = datetime.fromisoformat(job['scheduled_time'])
+                    # Ensure both datetimes are naive (no timezone info) for comparison
+                    if scheduled_time.tzinfo is not None:
+                        scheduled_time = scheduled_time.replace(tzinfo=None)
                     
-                    # Check if job is due to run
+                    # Check if job is due to run (both times are now in UTC)
                     if scheduled_time <= now:
                         logger.info(f"Executing scheduled job {job['id']}: {job['job_name']}")
                         try:
@@ -376,3 +380,35 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"Failed to get job status for {job_id}: {e}")
             return None
+    
+    def _extract_campaign_id_from_output(self, stdout: str, job_type: str, job_id: int) -> str:
+        """Extract actual campaign ID from GitPhish command output."""
+        try:
+            # Try to find campaign ID patterns in the output
+            import re
+            
+            # Look for campaign ID patterns in different formats
+            patterns = [
+                r'Campaign ID[:\s]*([a-zA-Z0-9_-]+)',
+                r'Campaign[:\s]*([a-zA-Z0-9_-]+)',
+                r'Started campaign[:\s]*([a-zA-Z0-9_-]+)',
+                r'ID[:\s]*([a-zA-Z0-9_-]+)',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, stdout, re.IGNORECASE)
+                if match:
+                    campaign_id = match.group(1).strip()
+                    logger.info(f"Extracted campaign ID from output: {campaign_id}")
+                    return campaign_id
+            
+            # If no campaign ID found in output, generate a fallback ID
+            fallback_id = f"{job_type}_{job_id}_{int(time.time())}"
+            logger.warning(f"No campaign ID found in output, using fallback: {fallback_id}")
+            return fallback_id
+            
+        except Exception as e:
+            # If anything goes wrong, use fallback ID
+            fallback_id = f"{job_type}_{job_id}_{int(time.time())}"
+            logger.error(f"Error extracting campaign ID: {e}, using fallback: {fallback_id}")
+            return fallback_id
