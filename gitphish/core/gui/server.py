@@ -22,6 +22,7 @@ from gitphish.core.gui.api.server_control_api import (
     ServerControlAPI,
 )
 from gitphish.core.gui.api.sms_campaigns_api import SMSCampaignsAPI
+from gitphish.core.gui.api.azure_campaigns_api import AzureCampaignsAPI
 
 
 class GitPhishGuiServer:
@@ -67,6 +68,11 @@ class GitPhishGuiServer:
             self.github_account_service,
             self.compromised_account_service
         )
+        self.azure_campaigns_api = AzureCampaignsAPI(
+            self.app,
+            self.github_account_service,
+            self.compromised_account_service
+        )
 
         # Configure logging
         logging.basicConfig(level=logging.INFO)
@@ -102,6 +108,11 @@ class GitPhishGuiServer:
         def sms_campaigns():
             """SMS campaigns management page."""
             return render_template("sms_campaigns.html")
+
+        @self.app.route("/azure-campaigns")
+        def azure_campaigns():
+            """Azure campaigns management page."""
+            return render_template("azure_campaigns.html")
 
         # Legacy routes - keeping for backward compatibility
         @self.app.route("/server-control")

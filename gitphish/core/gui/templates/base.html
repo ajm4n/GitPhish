@@ -746,6 +746,11 @@
                                 <i class="fas fa-sms me-2"></i>SMS Campaigns
                             </a>
                         </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'azure_campaigns' %}active{% endif %}" href="{{ url_for('azure_campaigns') }}">
+                                <i class="fab fa-microsoft me-2"></i>Azure Campaigns
+                            </a>
+                        </li>
                         
                         <!-- MANAGEMENT Section -->
                         <li class="nav-item mt-3">

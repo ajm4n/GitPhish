@@ -10,6 +10,7 @@ from gitphish.core.cli.deploy import setup_deploy_subparser
 from gitphish.core.cli.manual import setup_manual_subparser
 from gitphish.core.cli.postex import setup_postex_subparser
 from gitphish.core.cli.sms_campaigns import setup_sms_campaigns_subparser, handle_sms_campaigns_command
+from gitphish.core.cli.azure_campaigns import setup_azure_campaigns_subparser, handle_azure_campaigns_command
 
 GITPHISH_VERSION = "0.2.0"
 
@@ -56,6 +57,7 @@ def main():
     setup_manual_subparser(subparsers)
     setup_postex_subparser(subparsers)
     setup_sms_campaigns_subparser(subparsers)
+    setup_azure_campaigns_subparser(subparsers)
 
     parser.set_defaults(func=lambda args: parser.print_help())
 
