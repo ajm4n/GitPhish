@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  gitphish:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount data directory for persistent SQLite database
+      - ./data:/app/data
+      # Mount token directory for persistent tokens
+      - ./tokens:/app/tokens
+    environment:
+      - PYTHONPATH=/app
+      - FLASK_ENV=development
+    restart: unless-stopped
+    # Optional: Add health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
