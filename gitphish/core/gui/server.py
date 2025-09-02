@@ -23,6 +23,7 @@ from gitphish.core.gui.api.server_control_api import (
 )
 from gitphish.core.gui.api.sms_campaigns_api import SMSCampaignsAPI
 from gitphish.core.gui.api.azure_campaigns_api import AzureCampaignsAPI
+from gitphish.core.scheduler import JobScheduler
 
 
 class GitPhishGuiServer:
@@ -63,20 +64,27 @@ class GitPhishGuiServer:
             self.github_account_service,
         )
         self.server_control_api = ServerControlAPI(self.app)
+        # Initialize and start the global job scheduler
+        self.scheduler = JobScheduler()
+        self.scheduler.start()
+        
         self.sms_campaigns_api = SMSCampaignsAPI(
             self.app,
             self.github_account_service,
-            self.compromised_account_service
+            self.compromised_account_service,
+            self.scheduler
         )
         self.azure_campaigns_api = AzureCampaignsAPI(
             self.app,
             self.github_account_service,
-            self.compromised_account_service
+            self.compromised_account_service,
+            self.scheduler
         )
 
         # Configure logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+        self.logger.info("Job scheduler started")
 
     def _setup_page_routes(self):
         """Setup Flask routes for web pages."""

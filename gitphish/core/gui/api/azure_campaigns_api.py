@@ -14,17 +14,19 @@ from flask import request, jsonify
 import boto3
 from twilio.rest import Client
 from botocore.exceptions import BotoCoreError, ClientError
+from gitphish.core.scheduler import JobScheduler, JobStatus, JobType
 
 logger = logging.getLogger(__name__)
 
 class AzureCampaignsAPI:
     """API handler for Azure campaigns functionality."""
     
-    def __init__(self, app, github_account_service, compromised_account_service):
+    def __init__(self, app, github_account_service, compromised_account_service, scheduler=None):
         self.app = app
         self.github_account_service = github_account_service
         self.compromised_account_service = compromised_account_service
         self.active_campaigns = {}  # In-memory storage for demo - use DB in production
+        self.scheduler = scheduler or JobScheduler()
         self._setup_routes()
 
     def _setup_routes(self):
@@ -373,6 +375,95 @@ class AzureCampaignsAPI:
                 
             except Exception as e:
                 logger.error(f"Error downloading campaign tokens: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/azure-campaigns/schedule', methods=['POST'])
+        def schedule_azure_campaign():
+            """Schedule an Azure campaign for later execution."""
+            try:
+                data = request.get_json()
+                
+                # Validate required fields
+                required_fields = ['platform', 'provider', 'name', 'scheduledTime']
+                for field in required_fields:
+                    if not data.get(field):
+                        return jsonify({'success': False, 'error': f'{field} is required'}), 400
+                
+                # Parse scheduled time
+                try:
+                    scheduled_time = datetime.fromisoformat(data['scheduledTime'].replace('Z', '+00:00'))
+                except ValueError as e:
+                    return jsonify({'success': False, 'error': f'Invalid scheduled time format: {str(e)}'}), 400
+                
+                # Check if scheduled time is in the future
+                if scheduled_time <= datetime.now():
+                    return jsonify({'success': False, 'error': 'Scheduled time must be in the future'}), 400
+                
+                # Schedule the job
+                job_id = self.scheduler.schedule_job(
+                    JobType.AZURE_CAMPAIGN,
+                    data['name'],
+                    scheduled_time,
+                    data
+                )
+                
+                logger.info(f"Scheduled Azure campaign '{data['name']}' for {scheduled_time}")
+                
+                return jsonify({
+                    'success': True,
+                    'job_id': job_id,
+                    'scheduled_time': scheduled_time.isoformat(),
+                    'message': 'Campaign scheduled successfully'
+                })
+                
+            except Exception as e:
+                logger.error(f"Error scheduling Azure campaign: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/azure-campaigns/scheduled', methods=['GET'])
+        def list_scheduled_azure_campaigns():
+            """List all scheduled Azure campaigns."""
+            try:
+                # Get scheduled jobs from database
+                jobs = self.scheduler.get_scheduled_jobs()
+                
+                # Filter for Azure campaigns only
+                azure_jobs = [job for job in jobs if job['job_type'] == JobType.AZURE_CAMPAIGN.value]
+                
+                return jsonify({'success': True, 'scheduled_campaigns': azure_jobs})
+                
+            except Exception as e:
+                logger.error(f"Error listing scheduled Azure campaigns: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/azure-campaigns/scheduled/<int:job_id>/cancel', methods=['POST'])
+        def cancel_scheduled_azure_campaign(job_id):
+            """Cancel a scheduled Azure campaign."""
+            try:
+                success = self.scheduler.cancel_job(job_id)
+                
+                if success:
+                    return jsonify({'success': True, 'message': 'Scheduled campaign cancelled successfully'})
+                else:
+                    return jsonify({'success': False, 'error': 'Job not found or cannot be cancelled'}), 404
+                    
+            except Exception as e:
+                logger.error(f"Error cancelling scheduled Azure campaign: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/azure-campaigns/scheduled/<int:job_id>/status', methods=['GET'])
+        def get_scheduled_azure_campaign_status(job_id):
+            """Get status of a scheduled Azure campaign."""
+            try:
+                job = self.scheduler.get_job_status(job_id)
+                
+                if job:
+                    return jsonify({'success': True, 'job': job})
+                else:
+                    return jsonify({'success': False, 'error': 'Job not found'}), 404
+                    
+            except Exception as e:
+                logger.error(f"Error getting scheduled Azure campaign status: {str(e)}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
     def _build_campaign_command(self, data: Dict[str, Any]) -> Optional[list]:

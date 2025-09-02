@@ -28,7 +28,8 @@ dependencies = [
     "alembic==1.14.0",
     "tabulate",
     "boto3>=1.26.0",
-    "twilio>=8.0.0"
+    "twilio>=8.0.0",
+    "schedule>=1.2.0"
 ]
 
 [project.scripts]
