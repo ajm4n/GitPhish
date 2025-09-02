@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir \
     python-dotenv \
     urllib3==1.26.18 \
     jmespath==1.0.1 \
-    python-dateutil==2.8.2
+    python-dateutil==2.8.2 \
+    pygithub \
+    gitpython
 
 # Set Python path
 ENV PYTHONPATH=/app
