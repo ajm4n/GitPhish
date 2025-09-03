@@ -986,9 +986,37 @@ function scheduleCampaign() {
         return;
     }
     
+    // Create datetime with explicit timezone handling
     const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}`);
-    if (scheduledDateTime <= new Date()) {
+    const now = new Date();
+    
+    // Debug timezone info
+    console.log('Scheduled local time:', scheduledDateTime.toString());
+    console.log('Scheduled UTC time:', scheduledDateTime.toISOString());
+    console.log('Current local time:', now.toString());
+    console.log('Current UTC time:', now.toISOString());
+    console.log('User timezone:', Intl.DateTimeFormat().resolvedOptions().timeZone);
+    console.log('Timezone offset (minutes):', scheduledDateTime.getTimezoneOffset());
+    
+    if (scheduledDateTime <= now) {
         alert('❌ Scheduled time must be in the future');
+        return;
+    }
+    
+    // Show user confirmation with timezone info
+    const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localTimeStr = scheduledDateTime.toLocaleString('en-US', {
+        timeZone: userTimezone,
+        weekday: 'short',
+        year: 'numeric', 
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZoneName: 'short'
+    });
+    
+    if (!confirm(`Schedule campaign for:\n${localTimeStr}\n\nClick OK to confirm, Cancel to modify.`)) {
         return;
     }
     

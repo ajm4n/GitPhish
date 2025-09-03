@@ -501,20 +501,33 @@ class SMSCampaignsAPI:
                             job_data.pop('csvContent', None)
                             job_data.pop('targetMethod', None)
                             
-                            # Parse scheduled time
+                            # Parse scheduled time with better timezone handling
                             try:
-                                scheduled_time = datetime.fromisoformat(data['scheduledTime'].replace('Z', '+00:00'))
-                                # Convert to naive datetime for consistent comparison
+                                # Parse the ISO string from frontend (which is already UTC)
+                                scheduled_time_str = data['scheduledTime']
+                                if scheduled_time_str.endswith('Z'):
+                                    scheduled_time_str = scheduled_time_str[:-1] + '+00:00'
+                                
+                                scheduled_time = datetime.fromisoformat(scheduled_time_str)
+                                
+                                # Convert to naive UTC for consistent database storage
                                 if scheduled_time.tzinfo is not None:
-                                    scheduled_time = scheduled_time.replace(tzinfo=None)
+                                    scheduled_time = scheduled_time.utctimetuple()
+                                    scheduled_time = datetime(*scheduled_time[:6])
+                                
+                                logger.info(f"Parsed scheduled time: {scheduled_time} UTC")
+                                
                             except ValueError as e:
+                                logger.error(f"Failed to parse scheduled time: {data['scheduledTime']} - {e}")
                                 return jsonify({'success': False, 'error': f'Invalid scheduled time format: {str(e)}'}), 400
                             
                             # Check if scheduled time is in the future (compare in UTC)
                             from datetime import timezone
                             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                            logger.info(f"Current UTC time: {now_utc}, Scheduled UTC time: {scheduled_time}")
+                            
                             if scheduled_time <= now_utc:
-                                return jsonify({'success': False, 'error': 'Scheduled time must be in the future'}), 400
+                                return jsonify({'success': False, 'error': f'Scheduled time must be in the future. Current UTC: {now_utc}, Scheduled UTC: {scheduled_time}'}), 400
                             
                             # Schedule individual job
                             job_id = self.scheduler.schedule_job(
