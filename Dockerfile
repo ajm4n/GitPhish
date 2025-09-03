@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Copy the entire project
 COPY . .
 
-# Install Python dependencies
+# Install Python dependencies - comprehensive but practical set
 RUN pip install --no-cache-dir \
     flask==2.3.3 \
     flask-cors==4.0.0 \
@@ -30,7 +30,32 @@ RUN pip install --no-cache-dir \
     python-dateutil==2.8.2 \
     pygithub \
     gitpython \
-    tabulate
+    tabulate \
+    click \
+    colorama \
+    rich \
+    pyyaml \
+    toml \
+    jsonschema \
+    beautifulsoup4 \
+    lxml \
+    selenium \
+    paramiko \
+    psutil \
+    email-validator \
+    phonenumbers \
+    pytz \
+    dateparser \
+    httpx \
+    aiohttp \
+    pillow \
+    pandas \
+    numpy \
+    pytest \
+    black \
+    flake8 \
+    gunicorn \
+    uvicorn
 
 # Set Python path
 ENV PYTHONPATH=/app
