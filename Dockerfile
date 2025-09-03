@@ -29,7 +29,8 @@ RUN pip install --no-cache-dir \
     jmespath==1.0.1 \
     python-dateutil==2.8.2 \
     pygithub \
-    gitpython
+    gitpython \
+    tabulate
 
 # Set Python path
 ENV PYTHONPATH=/app
