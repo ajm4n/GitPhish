@@ -35,7 +35,7 @@ class JobScheduler:
         self.db_path = db_path
         self.running = False
         self.scheduler_thread = None
-        self.executor = ThreadPoolExecutor(max_workers=10)  # Allow up to 10 concurrent jobs
+        self.executor = ThreadPoolExecutor(max_workers=3)  # Allow up to 3 concurrent jobs to prevent resource exhaustion
         self.running_jobs = {}  # Track running job futures
         self._init_database()
         
