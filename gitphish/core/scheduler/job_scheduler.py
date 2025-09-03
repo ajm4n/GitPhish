@@ -13,6 +13,7 @@ from enum import Enum
 import schedule
 import subprocess
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ class JobScheduler:
         self.db_path = db_path
         self.running = False
         self.scheduler_thread = None
+        self.executor = ThreadPoolExecutor(max_workers=10)  # Allow up to 10 concurrent jobs
+        self.running_jobs = {}  # Track running job futures
         self._init_database()
         
     def _init_database(self):
@@ -316,19 +319,37 @@ class JobScheduler:
                 now = datetime.now(timezone.utc).replace(tzinfo=None)  # Get UTC time as naive
                 pending_jobs = self.get_scheduled_jobs(JobStatus.PENDING)
                 
+                # Clean up completed jobs
+                completed_jobs = []
+                for job_id, future in self.running_jobs.items():
+                    if future.done():
+                        completed_jobs.append(job_id)
+                        try:
+                            result = future.result()  # Get result or exception
+                        except Exception as e:
+                            logger.error(f"Job {job_id} completed with error: {e}")
+                
+                # Remove completed jobs from tracking
+                for job_id in completed_jobs:
+                    del self.running_jobs[job_id]
+                
                 for job in pending_jobs:
                     scheduled_time = datetime.fromisoformat(job['scheduled_time'])
                     # Ensure both datetimes are naive (no timezone info) for comparison
                     if scheduled_time.tzinfo is not None:
                         scheduled_time = scheduled_time.replace(tzinfo=None)
                     
-                    # Check if job is due to run (both times are now in UTC)
-                    if scheduled_time <= now:
-                        logger.info(f"Executing scheduled job {job['id']}: {job['job_name']}")
+                    # Check if job is due to run and not already running
+                    job_id = job['id']
+                    if scheduled_time <= now and job_id not in self.running_jobs:
+                        logger.info(f"Executing scheduled job {job_id}: {job['job_name']} in background thread")
                         try:
-                            self._execute_job(job)
+                            # Submit job to thread pool for parallel execution
+                            future = self.executor.submit(self._execute_job, job)
+                            self.running_jobs[job_id] = future
+                            logger.info(f"Job {job_id} submitted to thread pool. Currently running: {len(self.running_jobs)} jobs")
                         except Exception as e:
-                            logger.error(f"Failed to execute job {job['id']}: {e}")
+                            logger.error(f"Failed to submit job {job_id} to thread pool: {e}")
                 
                 # Sleep for 30 seconds before checking again
                 time.sleep(30)
@@ -357,6 +378,9 @@ class JobScheduler:
         self.running = False
         if self.scheduler_thread:
             self.scheduler_thread.join(timeout=10)
+        
+        # Shutdown thread pool executor
+        self.executor.shutdown(wait=False)
         logger.info("Job scheduler stopped")
     
     def get_job_status(self, job_id: int) -> Optional[Dict[str, Any]]:
