@@ -463,7 +463,12 @@
                 <h5 class="modal-title">
                     <i class="fas fa-clock me-2"></i>Scheduled SMS Campaigns
                 </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                <div class="ms-auto d-flex gap-2">
+                    <button type="button" class="btn btn-outline-danger btn-sm" onclick="cancelAllPendingJobs()" title="Cancel all pending scheduled campaigns">
+                        <i class="fas fa-times-circle me-1"></i>Cancel All Pending
+                    </button>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
             </div>
             <div class="modal-body">
                 <div class="table-responsive">
@@ -924,6 +929,26 @@ function cancelScheduledCampaign(jobId) {
         .then(data => {
             if (data.success) {
                 alert('✅ Scheduled campaign cancelled successfully');
+                refreshScheduledCampaigns();
+            } else {
+                alert('❌ ' + data.error);
+            }
+        })
+        .catch(error => {
+            alert('❌ Error: ' + error.message);
+        });
+    }
+}
+
+function cancelAllPendingJobs() {
+    if (confirm('⚠️ Are you sure you want to cancel ALL pending scheduled campaigns?\n\nThis action cannot be undone and will cancel all campaigns that have not yet started.')) {
+        fetch('/api/sms-campaigns/scheduled/cancel-all-pending', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert(`✅ Successfully cancelled ${data.cancelled_count} pending campaigns`);
                 refreshScheduledCampaigns();
             } else {
                 alert('❌ ' + data.error);

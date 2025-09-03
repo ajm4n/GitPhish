@@ -623,6 +623,44 @@ class AzureCampaignsAPI:
                 logger.error(f"Error cancelling scheduled Azure campaign: {str(e)}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/azure-campaigns/scheduled/cancel-all-pending', methods=['POST'])
+        def cancel_all_pending_azure_campaigns():
+            """Cancel all pending scheduled Azure campaigns."""
+            try:
+                # Get all pending jobs
+                pending_jobs = self.scheduler.get_scheduled_jobs(JobStatus.PENDING)
+                azure_pending_jobs = [job for job in pending_jobs if job['job_type'] == JobType.AZURE_CAMPAIGN.value]
+                
+                cancelled_count = 0
+                failed_jobs = []
+                
+                for job in azure_pending_jobs:
+                    success = self.scheduler.cancel_job(job['id'])
+                    if success:
+                        cancelled_count += 1
+                    else:
+                        failed_jobs.append(job['id'])
+                
+                if failed_jobs:
+                    logger.warning(f"Failed to cancel some jobs: {failed_jobs}")
+                    return jsonify({
+                        'success': True, 
+                        'cancelled_count': cancelled_count,
+                        'failed_jobs': failed_jobs,
+                        'message': f'Cancelled {cancelled_count} campaigns, failed to cancel {len(failed_jobs)} campaigns'
+                    })
+                else:
+                    logger.info(f"Successfully cancelled {cancelled_count} pending Azure campaigns")
+                    return jsonify({
+                        'success': True, 
+                        'cancelled_count': cancelled_count,
+                        'message': f'Successfully cancelled {cancelled_count} pending campaigns'
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error cancelling all pending Azure campaigns: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/azure-campaigns/scheduled/<int:job_id>/status', methods=['GET'])
         def get_scheduled_azure_campaign_status(job_id):
             """Get status of a scheduled Azure campaign."""
